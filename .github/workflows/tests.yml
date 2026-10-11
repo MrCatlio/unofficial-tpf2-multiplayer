@@ -1,0 +1,65 @@
+# Runs the lobby, relay and Lua checks that need neither the game nor the internet
+# on every pull request and on pushes to main and dev. build-msi.yml builds only
+# on main and tags and runs four Windows tests, so until now everything else here
+# ran on a developer's machine (docs/DEVELOPMENT.md, docs/NETWORKING.md).
+#
+# Left out on purpose: tools/relay_selftest.py needs the internet, the soak and
+# rig tests need a running game, and the native Linux tests need a CMake build
+# (some compare against the game's own binary, which a runner does not have).
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: netpunch/requirements.txt
+
+      - name: Python packages
+        # netpunch/requirements.txt is the lobby's; lupa runs the mod's Lua in the
+        # tests, luaparser is tools/luacheck.py's parser
+        run: pip install -r netpunch/requirements.txt lupa luaparser
+
+      - name: Sealing
+        working-directory: netpunch
+        run: python seal.py
+
+      - name: Lobby self-tests
+        working-directory: netpunch
+        run: |
+          python lobby.py --selftest
+          python lobby.py --selftest-relay
+          python lobby.py --selftest-mesh
+
+      - name: Lobby, relay and history regressions
+        run: |
+          for t in relay_letters_test rename_letter_test lobby_mode_test test_lobby_limits host_malformed_test net_guards_test hist_retention_test; do
+            echo "::group::$t"
+            python "tools/$t.py"
+            echo "::endgroup::"
+          done
+
+      - name: Lua parse check
+        run: python tools/luacheck.py
+
+      - name: Documentation links
+        run: python tools/check_doc_links.py
