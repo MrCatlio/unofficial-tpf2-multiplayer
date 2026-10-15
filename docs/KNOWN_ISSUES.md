@@ -10,12 +10,6 @@ something here is fixed, the release note says so and the entry goes.
   leader letter, so an instance named leader later (a relay lobby after its first leader leaves,
   or one whose first leader is not letter `a`) never learns it, and no instance acts as the
   session clock. See [ARCHITECTURE.md](ARCHITECTURE.md#pacing-and-game-speed).
-- **History sent to a catching-up follower breaks parameterised commands** *(from the code,
-  re-checked 2026-09-20)*. The history pump appends `hist=1 hfor=<letter>` after the line's
-  greedy `params=` tail, so constructions and upgrades replayed from history arrive with the
-  tail inside their parameters and without their history flag. A frozen join (0.6) loads a
-  save instead of history, so this only reaches a follower that fell more than 8 units behind
-  during play.
 - **Far behind, actions are off.** More than 15 units behind the fastest game, a player's builds,
   buys and edits are cancelled until they are back within 2 units. By design, but it surprises.
 
@@ -54,9 +48,6 @@ something here is fixed, the release note says so and the entry goes.
 
 ## Lobby and relay
 
-- **A dedicated relay hangs after 702 distinct player names** *(from the code)*. Letters run
-  `a`..`zz`; the letter allocator then loops forever. Letters are kept per name in
-  `relay_letters.json` across restarts, so a long-running public relay will get there.
 - **Joiners on one LAN rarely link directly** *(from the code)*. The panel starts joiners with
   `--local-port 0`, so a joiner's LAN candidate carries port 0 and joiners behind the same
   router reach each other only through NAT hairpinning, otherwise via the host.

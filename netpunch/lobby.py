@@ -4132,6 +4132,77 @@ def _origin_letter(idx):
     return chr(97 + (idx // 26) % 26) + chr(97 + idx % 26)
 
 
+# Every letter _origin_letter() can name: a..z, then aa..zz. Past this index the
+# sequence wraps and repeats ("aa" again at 702), which made letter_for() loop
+# forever once a relay had remembered 702 distinct player names.
+ORIGIN_LETTER_COUNT = 26 + 26 * 26
+
+
+def _allocate_origin_letter(letters, reserved=(), connected=()):
+    """The lowest origin letter nobody holds, for a name that has none yet.
+
+    ``letters`` maps name -> letter, in the order the letters were handed out (a
+    relay keeps it across restarts, so it only grows). ``reserved`` letters are
+    never handed out (a player-hosted game's host is always 'a'); ``connected``
+    are the names in the lobby now, whose letters must not move.
+
+    When all ORIGIN_LETTER_COUNT letters are taken, the oldest names that are not
+    connected are dropped from ``letters`` until one frees up: those players are
+    gone, and nobody in a running game is renumbered. Returns
+    ``(letter, released_names)``; ``letter`` is None only when every letter
+    belongs to a connected player, which CAP keeps from happening.
+    """
+    released = []
+    while True:
+        used = set(letters.values()) | set(reserved)
+        for i in range(ORIGIN_LETTER_COUNT):
+            letter = _origin_letter(i)
+            if letter not in used:
+                return letter, released
+        gone = next((n for n in letters if n not in connected), None)
+        if gone is None:
+            return None, released
+        del letters[gone]
+        released.append(gone)
+
+
+def _write_json_atomic(path, obj):
+    """Write ``obj`` as JSON so that a crash mid-write cannot leave a truncated file.
+
+    The relay reads its remembered letters and company chips back at start-up
+    and treats an unreadable file as "nothing remembered", which renumbers every
+    player of a world that is already running. A temp file renamed over the old
+    one leaves either the whole old file or the whole new one. A temp file that
+    cannot be written completely (disk full) leaves the old file alone. Where the
+    filesystem refuses only the rename (the write_state note above: Sandboxie,
+    some overlay filesystems) it falls back to writing in place, as before.
+    Returns True when the file was written; the callers' state is advisory, so a
+    failure is not an error.
+    """
+    tmp = path + ".tmp"
+    written = False
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+            f.flush()
+        written = True
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    if not written:
+        return False
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        return True
+    except OSError:
+        return False
+
+
 class _PeerConn:
     """The receive side (_ClientSaveReceiver) talks to 'the host' through a
     .send(bytes); on the relay the sender is one joiner, so wrap (sock, addr)."""
@@ -4222,23 +4293,24 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
             with open(letters_path, "r", encoding="utf-8") as f:
                 letters.update({str(k): str(v) for k, v in json.load(f).items()})
             log(f"[relay] {len(letters)} letter(s) remembered from the last run")
-        except (OSError, ValueError):
-            pass
+        except FileNotFoundError:
+            pass                            # first run
+        except (OSError, ValueError) as e:
+            log(f"[relay] cannot read {letters_path} ({e}): origin letters start afresh, "
+                "so players already in a running world may be renumbered")
         try:
             with open(chips_path, "r", encoding="utf-8") as f:
                 chips.update({str(k): int(v) for k, v in json.load(f).items()})
-        except (OSError, ValueError):
+        except FileNotFoundError:
             pass
+        except (OSError, ValueError) as e:
+            log(f"[relay] cannot read {chips_path} ({e}): company chips start afresh")
 
     def remember_chip(name, cid):
         if not relay_only:
             return
         chips[name] = int(cid)
-        try:
-            with open(chips_path, "w", encoding="utf-8") as f:
-                json.dump(chips, f)
-        except OSError:
-            pass
+        _write_json_atomic(chips_path, chips)
 
     def leader_addr():
         """relay-only: the oldest connected joiner (peers is insertion-ordered)."""
@@ -4266,19 +4338,18 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
         if not relay_only and name == host_name:
             return "a"
         if name not in letters:
-            used = set(letters.values())
-            if not relay_only:
-                used.add("a")
-            i = 0
-            while _origin_letter(i) in used:
-                i += 1
-            letters[name] = _origin_letter(i)
+            letter, released = _allocate_origin_letter(
+                letters, () if relay_only else ("a",),
+                {p["name"] for p in peers.values()})
+            if released:
+                log(f"[lobby] all {ORIGIN_LETTER_COUNT} origin letters were taken: released "
+                    f"those of the {len(released)} oldest player name(s) no longer in the lobby")
+            if letter is None:
+                raise RuntimeError(f"no origin letter free for {name!r}: all {ORIGIN_LETTER_COUNT} "
+                                   "belong to connected players")
+            letters[name] = letter
             if relay_only:
-                try:
-                    with open(letters_path, "w", encoding="utf-8") as f:
-                        json.dump(letters, f)
-                except OSError:
-                    pass
+                _write_json_atomic(letters_path, letters)
         return letters[name]
 
     def roster_letters():
@@ -4719,11 +4790,7 @@ def run_host(sock, my_name, io, code=None, stop=None, drop_after=DROP_AFTER,
             if new_name != old_name and old_name in letters and new_name not in letters:
                 letters[new_name] = letters.pop(old_name)
                 if relay_only:
-                    try:
-                        with open(letters_path, "w", encoding="utf-8") as f:
-                            json.dump(letters, f)
-                    except OSError:
-                        pass
+                    _write_json_atomic(letters_path, letters)
             if profile:
                 peers[addr]["profile"] = profile
             peers[addr]["mesh"] = bool(is_mesh)

@@ -429,6 +429,7 @@ python seal.py                        # sealing: round trip, tamper, replay, reo
 python mesh.py                        # three mesh nodes
 python connect.py selftest            # code format and a loopback connect race
 python ..\tools\relay_selftest.py     # real processes, dedicated relay (needs internet)
+python ..\tools\relay_letters_test.py # a relay that remembers 702 names still admits joiners; atomic state files
 ```
 
 `punch.py`, `connect.py` and `observe.py` also run standalone (a two-player punch test, the
